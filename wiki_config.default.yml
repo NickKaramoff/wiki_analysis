@@ -1,0 +1,19 @@
+database:
+  host: localhost
+  port: '5432'
+  dbname: wiki_analysis
+  username: wiki
+  password: wiki
+  drop: true
+fetch:
+  lang:
+  all_pages_path: /wiki/Special:AllPages
+  timeout: 30
+  skip: true
+analyze:
+  iterations: 20
+  top_pages_amount: 25
+script:
+  headers:
+    User-Agent: wiki_analysis/0.4
+  term_width: 80

@@ -1,68 +1,58 @@
-# Copyright (c) 2019 Nikita Karamov <nick@karamoff.ru>
+#  Copyright (c) 2019 Nikita Karamov <nick@karamoff.ru>
 
-import argparse
-import shutil
 import sys
 import time
+
+import configurator
+from logger import Logger
 
 from bs4 import BeautifulSoup as Bs
 import numpy as np
 import pandas as pd
 import psycopg2
 import requests
-import yaml
 
 if __name__ == '__main__':
-    pass
+    print('wiki_analysis')
+    print('~~~~~~~~~~~~~')
+    print()
 
-# PARSE ARGS
-parser = argparse.ArgumentParser(add_help=True)
-parser.add_argument('lang',
-                    help='language of the wiki')
-parser.add_argument('-c',
-                    metavar='CONFIG_FILE',
-                    help='specify a different config file')
-parser.add_argument('-d', '--drop',
-                    action='store_true', help='drop the table if it exists')
-parser.add_argument('-a', '--analyze',
-                    action='store_true', help='only analyze existing data')
-args = parser.parse_args()
+config = configurator.get_config(sys.argv)
+lg = Logger()
 
-LANG = args.lang
+LANG = config['fetch']['lang']
 TABLE_NAME = LANG
 HOST = f"https://{LANG}.wikipedia.org"
-ALL_PAGES = "/wiki/Special:AllPages"
-HEADERS = {'User-Agent': 'wiki_analysis/0.4'}
-TIMEOUT = 30
-ITERATIONS = 20
-TOP_PAGES_AMOUNT = 25
-TERMINAL_WIDTH = shutil.get_terminal_size().columns
+ALL_PAGES = config['fetch']['all_pages_path']
+TIMEOUT = config['fetch']['timeout']
+
+ITERATIONS = config['analyze']['iterations']
+TOP_PAGES_AMOUNT = config['analyze']['top_pages_amount']
+
+HEADERS = config['script']['headers']
+TERMINAL_WIDTH = config['script']['term_width']
 
 pages = []
 
-print('=============')
-print('wiki_analysis')
-print('=============')
-print()
-
 # DATABASE CONNECTION
-db_conf = yaml.load(open('config.yml').read())['database']
-print("Connecting to database...")
+db_conf = config['database']
+lg.info("Connecting to database...")
 try:
     CONN = psycopg2.connect(
-        host=db_conf.get('host') or 'localhost',
-        database=db_conf.get('dbname') or 'wiki_analysis',
-        user=db_conf.get('username') or 'wiki',
-        password=db_conf.get('password') or 'wiki',
-        port=db_conf.get('port') or '5432'
+        host=db_conf.get('host'),
+        database=db_conf.get('dbname'),
+        user=db_conf.get('username'),
+        password=db_conf.get('password'),
+        port=db_conf.get('port')
     )
     CUR = CONN.cursor()
-    print("Connected to database.")
+    lg.info("Connected to database.")
 except psycopg2.DatabaseError:
-    sys.exit("Connection to database failed.")
+    lg.error("Connection to database failed.")
+    sys.exit(2)
 print()
 
-if not args.analyze:
+if not config['fetch']['skip']:
     # TABLES DROP AND CREATION
     CUR.execute("SELECT exists("
                 "SELECT 1 FROM information_schema.tables "
@@ -76,13 +66,13 @@ if not args.analyze:
                 "SELECT 1 FROM information_schema.tables "
                 f"WHERE table_schema='public' AND table_name='{LANG}_links')")
     exists = exists or CUR.fetchone()
-    if exists and not args.drop:
-        print(f"Tables with prefix {LANG} exist in database. Drop or rename "
-              "them. You can also run the script with -d flag to drop the "
-              "tables.")
+    if exists and not config['database']['drop']:
+        lg.error(f"Tables with prefix {LANG} exist in database. Drop or rename "
+                 "them. You can also run the script with -d flag to drop the "
+                 "tables or edit the config file.")
         CONN.close()
         sys.exit(0)
-    print("Dropping old tables...")
+    lg.info("Dropping old tables...")
     CUR.execute(f"DROP TABLE IF EXISTS {TABLE_NAME}_urls;")
     CUR.execute(f"DROP TABLE IF EXISTS {TABLE_NAME}_links;")
     CUR.execute(f"DROP TABLE IF EXISTS {TABLE_NAME};")
@@ -99,7 +89,7 @@ if not args.analyze:
                 f"ON DELETE CASCADE,"
                 "url VARCHAR(2047));")
     CONN.commit()
-    print("New tables created.")
+    lg.info("New tables created.")
     print()
 
 
@@ -178,9 +168,8 @@ def analyze(article_url):
         if title not in pages:
             add_to_database(title)
             pages.append(title)
-            print(f"\r{len(pages) - 1} analyzed. "
-                  f"Parsing {title}".ljust(TERMINAL_WIDTH),
-                  end='')
+            lg.debug(f"{len(pages) - 1} analyzed. "
+                     f"Parsing {title}")
 
             links = a_soup.select(".mw-parser-output > p > a")
             for link in links:
@@ -195,16 +184,16 @@ def analyze(article_url):
         return title
 
     except requests.exceptions.Timeout:
-        print(f"\r{article_url} timed out")
+        lg.warning(f"{article_url} timed out")
         return None
     except requests.exceptions.ConnectionError:
-        print(f"\rCouldn't connect to {article_url}")
+        lg.warning(f"Couldn't connect to {article_url}")
         return None
 
 
-if not args.analyze:
+if not config['fetch']['skip']:
     # PAGES FETCHING
-    print("Getting all pages urls...")
+    lg.info("Getting all pages urls...")
     finished = False
     next_url = HOST + ALL_PAGES
     start = time.perf_counter()
@@ -219,8 +208,8 @@ if not args.analyze:
         finished = True
         if len(all_pages_nav) > 0:
             if len(list(all_pages_nav[0].children)) != 1 \
-                or len(list(all_pages_nav[0].children)) == 1 \
-                and len(pages) == 0:
+                    or len(list(all_pages_nav[0].children)) == 1 \
+                    and len(pages) == 0:
                 next_url = HOST + \
                            list(all_pages_nav[0].children)[-1]['href']
                 finished = False
@@ -231,36 +220,35 @@ if not args.analyze:
                 continue
             analyze(HOST + next(article.children)['href'])
     end = time.perf_counter()
-    print("\r ", end='')
-    print(f"\r{len(pages)} pages analyzed! Took {round(end - start, 3)} s.")
+    lg.info(f"{len(pages)} pages analyzed. Took {round(end - start, 3)} s.")
     print()
 
 # DATASET FETCHING
-print("Preparing data for analysis...")
+lg.info("Preparing data for analysis...")
 try:
     CUR.execute("SELECT from_title, to_title "
                 f"FROM {TABLE_NAME}_links;")
 except psycopg2.DatabaseError:
-    print(f"Database error. Please check that the tables '{LANG}', "
-          f"'{LANG}_urls' and '{LANG}_links' exist in your database.")
+    lg.error(f"Database error. Please check that the tables '{LANG}', "
+             f"'{LANG}_urls' and '{LANG}_links' exist in your database.")
     CONN.close()
-    sys.exit(1)
+    sys.exit(2)
 data = np.array(CUR.fetchall())
 CONN.commit()
 link_count = len(data)
 if link_count == 0:
     CONN.close()
-    print("There are no links; can't analyze.")
+    lg.warning("There are no links; can't analyze.")
     sys.exit(0)
 start = time.perf_counter()
 from_titles = list(n[0] for n in data[np.ix_(range(link_count), [0])].tolist())
 to_titles = list(n[0] for n in data[np.ix_(range(link_count), [1])].tolist())
 all_titles = list(sorted(set(from_titles + to_titles)))
-print("Data prepared.")
+lg.info("Data prepared.")
 print()
 
 # CALCULATING
-print("Calculating...")
+lg.info("Calculating...")
 n = len(all_titles)
 m = np.zeros((n, n), dtype=np.float)
 b = 0.85
@@ -280,7 +268,7 @@ for i in range(n):
 for i in range(ITERATIONS):
     v = (b * m).dot(v) + ((1 - b) / n) * e
 end = time.perf_counter()
-print(f"Calculation finished. Took {round(end - start, 3)} s.")
+lg.info(f"Calculation finished. Took {round(end - start, 3)} s.")
 print()
 
 # DATA OUTPUT
@@ -293,6 +281,6 @@ print(df)
 print()
 
 # EXITING
-print("Closing connection...")
+lg.info("Closing connection...")
 CONN.close()
-print("Connection closed.")
+lg.info("Connection closed.")
